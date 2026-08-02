@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+
+# Env
+.env
+
+# Data & logs
+/data/
+/logs/
+/reports/
+
+# Browser artifacts
+/playwright-report/
+/test-results/
+
+# OS
+.DS_Store
+Thumbs.db

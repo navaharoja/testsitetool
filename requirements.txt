@@ -1,0 +1,6 @@
+# Compatibility dependencies for the legacy scraper prototype.
+# The new package is installed with: pip install -e ".[dev]"
+requests
+beautifulsoup4
+lxml
+python-dotenv

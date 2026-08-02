@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "webuserflowagent"
+version = "0.1.0"
+description = "Discover web interfaces and turn user flows into automation scripts"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+explorer = ["playwright>=1.48,<2"]
+legacy = [
+  "beautifulsoup4",
+  "lxml",
+  "python-dotenv",
+  "requests",
+]
+
+[project.scripts]
+webuserflow = "webuserflowagent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
