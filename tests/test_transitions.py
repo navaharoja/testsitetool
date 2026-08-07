@@ -12,7 +12,7 @@ def test_manifest_accepts_transition_between_known_states():
         name="demo",
         base_url="https://example.com",
         pages=[Page("initial", "/", elements=[cookie_button()]), Page("ready", "/")],
-        transitions=[Transition("initial", "ready", "click", "accept_cookies")],
+        transitions=[Transition("initial", "ready", "click", "accept_cookies", value=None)],
     )
 
     manifest.validate()

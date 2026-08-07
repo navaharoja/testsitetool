@@ -1,4 +1,4 @@
-from webuserflowagent.explorer.page import elements_from_raw
+from webuserflowagent.explorer.page import _result_state_type, _search_target, elements_from_raw
 
 
 def test_elements_prioritize_semantic_selectors_and_deduplicate_keys():
@@ -77,3 +77,39 @@ def test_repair_handles_double_mojibake():
     )
 
     assert elements[0].text == "Men\u00fa"
+
+
+def test_search_target_prefers_semantic_search_field():
+    elements = elements_from_raw(
+        [
+            {"tag": "input", "role": "textbox", "label": "Nombre", "css": "#name"},
+            {
+                "tag": "input",
+                "role": "textbox",
+                "label": "Buscar productos",
+                "name": "as_word",
+                "css": "#search",
+            },
+        ]
+    )
+
+    assert _search_target(elements).key == "textbox_buscar_productos"
+
+
+def test_search_target_accepts_combobox():
+    elements = elements_from_raw(
+        [{
+            "tag": "input",
+            "role": "combobox",
+            "label": "Buscar productos",
+            "name": "as_word",
+            "css": "#search",
+        }]
+    )
+
+    assert _search_target(elements).key == "combobox_buscar_productos"
+
+
+def test_result_state_recognizes_captcha_wall():
+    assert _result_state_type("https://example.com/captcha/wall", "Seguridad") == "challenge"
+    assert _result_state_type("https://example.com/search?q=test", "Resultados") == "results"

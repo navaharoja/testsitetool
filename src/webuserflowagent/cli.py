@@ -31,6 +31,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not dismiss a recognized cookie consent dialog",
     )
+    explore_parser.add_argument(
+        "--search",
+        metavar="QUERY",
+        help="Run a search after the page is ready and capture the results state",
+    )
     return parser
 
 
@@ -59,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         timeout_ms=args.timeout,
         screenshot_path=screenshot,
         dismiss_cookies=not args.keep_cookies,
+        search_query=args.search,
     )
     save(manifest, output)
     element_count = sum(len(page.elements) for page in manifest.pages)
@@ -67,4 +73,10 @@ def main(argv: list[str] | None = None) -> int:
         f"{len(manifest.transitions)} transitions, {element_count} elements"
     )
     print(f"Manifest created: {output}")
+    challenges = [page for page in manifest.pages if page.state_type == "challenge"]
+    if challenges:
+        print(
+            "Warning: navigation reached a security challenge; "
+            "it was recorded but not bypassed."
+        )
     return 0

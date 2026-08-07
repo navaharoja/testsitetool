@@ -43,11 +43,14 @@ class Page:
     key: str
     url_pattern: str
     title: str | None = None
+    state_type: str = "captured"
     elements: list[Element] = field(default_factory=list)
 
     def validate(self) -> None:
         if not self.key.strip() or not self.url_pattern.strip():
             raise ValueError("Page key and url_pattern are required")
+        if self.state_type not in {"captured", "blocked", "ready", "results", "challenge"}:
+            raise ValueError(f"Unsupported page state_type: {self.state_type}")
         keys = [element.key for element in self.elements]
         if len(keys) != len(set(keys)):
             raise ValueError(f"Page '{self.key}' contains duplicate element keys")
@@ -85,6 +88,7 @@ class Transition:
     to_page: str
     action: str
     target: str
+    value: str | None = None
 
     def validate(self) -> None:
         if not all(value.strip() for value in (self.from_page, self.to_page, self.action, self.target)):

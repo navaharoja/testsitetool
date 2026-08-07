@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from ..models import ApplicationManifest, Element, Page, Selector, Transition
+from ..models import ApplicationManifest, Element, Flow, FlowStep, Page, Selector, Transition
 
 INTERACTIVE_SELECTOR = (
     "a[href], button, input:not([type='hidden']), select, textarea, "
@@ -275,6 +275,63 @@ def _write_screenshot(browser_page: Any, screenshot_path: str) -> None:
     browser_page.screenshot(path=str(path), full_page=True)
 
 
+def _search_target(elements: list[Element]) -> Element | None:
+    textboxes = [
+        element
+        for element in elements
+        if element.kind in {"textbox", "searchbox", "search", "combobox"}
+    ]
+    if not textboxes:
+        return None
+    for element in textboxes:
+        searchable = " ".join(
+            filter(None, [element.key, element.label, element.text, element.attributes.get("name")])
+        ).lower()
+        if any(hint in searchable for hint in ("search", "buscar", "busqueda", "as_word")):
+            return element
+    return textboxes[0] if len(textboxes) == 1 else None
+
+
+def _locator_for_element(browser_page: Any, element: Element) -> Any:
+    for selector in element.selectors:
+        if selector.unique is not True:
+            continue
+        if selector.strategy == "testid":
+            return browser_page.get_by_test_id(selector.value)
+        if selector.strategy == "label":
+            return browser_page.get_by_label(selector.value, exact=True)
+        if selector.strategy == "placeholder":
+            return browser_page.get_by_placeholder(selector.value, exact=True)
+        if selector.strategy == "name":
+            escaped = selector.value.replace('"', '\\"')
+            return browser_page.locator(f'[name="{escaped}"]')
+        if selector.strategy == "css":
+            return browser_page.locator(selector.value)
+    raise RuntimeError(f"No unique executable selector for element '{element.key}'")
+
+
+def _perform_search(browser_page: Any, elements: list[Element], query: str, timeout_ms: int) -> str:
+    target = _search_target(elements)
+    if target is None:
+        raise RuntimeError("No unambiguous search textbox was discovered")
+    locator = _locator_for_element(browser_page, target)
+    locator.fill(query)
+    locator.press("Enter")
+    try:
+        browser_page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+    except Exception:
+        # Client-side applications may update results without a document navigation.
+        pass
+    browser_page.wait_for_timeout(750)
+    return target.key
+
+
+def _result_state_type(url: str, title: str) -> str:
+    haystack = f"{url} {title}".lower()
+    challenge_markers = ("captcha", "challenge", "security-check", "seguridad")
+    return "challenge" if any(marker in haystack for marker in challenge_markers) else "results"
+
+
 def explore_page(
     url: str,
     application_name: str,
@@ -283,6 +340,7 @@ def explore_page(
     timeout_ms: int = 30_000,
     screenshot_path: str | None = None,
     dismiss_cookies: bool = True,
+    search_query: str | None = None,
 ) -> ApplicationManifest:
     try:
         from playwright.sync_api import sync_playwright
@@ -306,6 +364,15 @@ def explore_page(
                 ready_raw, final_url, title = _capture(browser_page)
             else:
                 ready_raw, final_url, title = initial_raw, initial_url, initial_title
+            ready_elements = elements_from_raw(ready_raw)
+            search_target: str | None = None
+            if search_query:
+                if screenshot_path:
+                    path = Path(screenshot_path)
+                    ready_path = path.with_name(f"{path.stem}-ready{path.suffix}")
+                    _write_screenshot(browser_page, str(ready_path))
+                search_target = _perform_search(browser_page, ready_elements, search_query, timeout_ms)
+                results_raw, results_url, results_title = _capture(browser_page)
             if screenshot_path:
                 _write_screenshot(browser_page, screenshot_path)
         finally:
@@ -324,14 +391,16 @@ def explore_page(
             Page(
                 key=initial_key,
                 title=initial_title or None,
+                state_type="blocked",
                 url_pattern=urlsplit(initial_url).path or "/",
                 elements=elements_from_raw(initial_raw),
             ),
             Page(
                 key=ready_key,
                 title=title or None,
+                state_type="ready",
                 url_pattern=parsed.path or "/",
-                elements=elements_from_raw(ready_raw),
+                elements=ready_elements,
             ),
         ]
         transitions.append(Transition(initial_key, ready_key, "click", consent_target))
@@ -340,20 +409,53 @@ def explore_page(
             Page(
                 key=ready_key,
                 title=title or None,
+                state_type="ready",
                 url_pattern=parsed.path or "/",
-                elements=elements_from_raw(ready_raw),
+                elements=ready_elements,
             )
         ]
+
+    flows: list[Flow] = []
+    if search_query and search_target:
+        results_parsed = urlsplit(results_url)
+        result_type = _result_state_type(results_url, results_title)
+        suffix = "challenge" if result_type == "challenge" else "search_results"
+        results_key = f"{_slug(results_title or results_parsed.path, 'results')}_{suffix}"
+        if results_key in {page.key for page in pages}:
+            results_key = f"{results_key}_2"
+        pages.append(
+            Page(
+                key=results_key,
+                title=results_title or None,
+                state_type=result_type,
+                url_pattern=results_parsed.path or "/",
+                elements=elements_from_raw(results_raw),
+            )
+        )
+        transitions.append(
+            Transition(ready_key, results_key, "search", search_target, value=search_query)
+        )
+        flows.append(
+            Flow(
+                name="search",
+                steps=[
+                    FlowStep(action="fill", target=search_target, value=search_query),
+                    FlowStep(action="press", target=search_target, value="Enter", expected_page=results_key),
+                ],
+            )
+        )
 
     manifest = ApplicationManifest(
         name=application_name,
         base_url=base_url,
         pages=pages,
+        flows=flows,
         transitions=transitions,
         metadata={
             "explorer": "playwright",
             "source_url": url,
             "cookie_consent_dismissed": consent_target is not None,
+            "challenge_detected": any(page.state_type == "challenge" for page in pages),
         },
     )
     manifest.validate()

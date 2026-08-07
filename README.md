@@ -79,6 +79,15 @@ Mostrar el navegador durante la exploración:
 webuserflow explore https://example.com --name demo --headed
 ```
 
+Ejecutar y registrar un flujo de búsqueda:
+
+```powershell
+webuserflow explore https://www.mercadolibre.cl/ `
+  --name mercadolibre `
+  --search "notebook" `
+  --headed
+```
+
 Guardar capturas de los estados detectados:
 
 ```powershell
@@ -151,8 +160,8 @@ como referencia y no forma parte del núcleo nuevo.
 
 ## Próximos hitos
 
-1. Ejecutar el primer flujo de búsqueda y capturar su cambio de URL.
-2. Construir un grafo navegable con múltiples acciones y estados.
+1. Construir un grafo navegable con múltiples acciones y estados.
+2. Permitir reanudación manual segura ante desafíos como CAPTCHA o MFA.
 3. Incorporar el Flow Agent.
 4. Generar scripts Playwright/Python.
 5. Ejecutar, verificar y reparar automatizaciones.
