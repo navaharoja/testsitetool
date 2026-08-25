@@ -36,6 +36,23 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="QUERY",
         help="Run a search after the page is ready and capture the results state",
     )
+
+    flow_parser = subparsers.add_parser(
+        "flow", help="Discover multi-step flows by clicking through the site (Flow Agent)"
+    )
+    flow_parser.add_argument("url", help="Starting page URL")
+    flow_parser.add_argument("--name", required=True, help="Application name")
+    flow_parser.add_argument("--output", type=Path, help="Output JSON path")
+    flow_parser.add_argument("--headed", action="store_true", help="Show the browser window")
+    flow_parser.add_argument("--timeout", type=int, default=30_000, help="Navigation timeout in milliseconds")
+    flow_parser.add_argument("--max-pages", type=int, default=8, help="Max distinct states to discover")
+    flow_parser.add_argument("--max-actions-per-page", type=int, default=6, help="Max candidate clicks tried per state")
+    flow_parser.add_argument("--max-depth", type=int, default=3, help="Max clicks from the starting page")
+    flow_parser.add_argument(
+        "--keep-cookies",
+        action="store_true",
+        help="Do not dismiss a recognized cookie consent dialog",
+    )
     return parser
 
 
@@ -51,6 +68,30 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "validate":
         manifest = load(args.path)
         print(f"Valid manifest: {manifest.name} ({len(manifest.pages)} pages, {len(manifest.flows)} flows)")
+        return 0
+
+    if args.command == "flow":
+        from .flow import explore_flows
+
+        output = args.output or Path("data/manifests") / f"{args.name}.json"
+        manifest = explore_flows(
+            args.url,
+            args.name,
+            headless=not args.headed,
+            timeout_ms=args.timeout,
+            max_pages=args.max_pages,
+            max_actions_per_page=args.max_actions_per_page,
+            max_depth=args.max_depth,
+            dismiss_cookies=not args.keep_cookies,
+        )
+        save(manifest, output)
+        element_count = sum(len(page.elements) for page in manifest.pages)
+        print(
+            f"Flow exploration complete: {len(manifest.pages)} states, "
+            f"{len(manifest.transitions)} transitions, {len(manifest.flows)} flows, "
+            f"{element_count} elements"
+        )
+        print(f"Manifest created: {output}")
         return 0
 
     from .explorer import explore_page
