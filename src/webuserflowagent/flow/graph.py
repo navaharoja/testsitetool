@@ -35,8 +35,14 @@ from ..explorer.page import (
 from ..models import ApplicationManifest, Element, Flow, FlowStep, Page, Transition
 
 DEFAULT_MAX_PAGES = 8
-DEFAULT_MAX_ACTIONS_PER_PAGE = 6
+DEFAULT_MAX_ACTIONS_PER_PAGE = 8
 DEFAULT_MAX_DEPTH = 3
+
+# state_signature: cuantos elementos primary en el cuerpo antes de dejar de
+# distinguirlos por label y tratar la pantalla como un listado ("grid"). Sube
+# esto si un wizard/form con muchos campos se esta colapsando con otro estado;
+# bajalo si una grilla de tarjetas se esta forkeando en varios estados.
+_BODY_LABEL_LIMIT = 8
 
 # Palabras que, si aparecen en el texto/label/href visible de un elemento,
 # lo excluyen de los candidatos a click — el crawler nunca debe intentar
@@ -85,20 +91,37 @@ def _is_same_origin(href: str, base_netloc: str) -> bool:
     return parsed.netloc == base_netloc
 
 
+_BACK_WORDS = ("volver", "ir al inicio", "atras", "atrás", "back to", "regresar")
+_LEGAL_PATH_WORDS = ("politic", "privac", "termino", "terms", "cookie", "legal", "condicion")
+
+
 def candidate_elements(
-    elements: list[Element], base_netloc: str, max_actions: int,
+    elements: list[Element],
+    base_netloc: str,
+    max_actions: int,
+    visited_paths: frozenset[str] = frozenset(),
+    depth: int = 0,
 ) -> list[Element]:
     """Filtra y prioriza que elementos son seguros/utiles para clickear.
 
-    Reglas: requiere al menos un selector unico (mismo requisito que
-    _locator_for_element ya impone al ejecutar el click, chequeado antes
-    para no gastar un intento en un elemento que fallaria igual); descarta
-    texto/label/href con palabras destructivas; descarta href fuera de
-    origen, mailto/tel/javascript, o que apunte a un archivo descargable;
-    prioriza link/button sobre contenedores clickeables genericos.
+    Descarta: sin selector unico (mismo requisito que _locator_for_element);
+    palabras destructivas; href fuera de origen, mailto/tel/javascript, o a
+    un archivo descargable.
+
+    Prioridad (menor = se clickea antes), pensada para que el presupuesto de
+    clicks por pagina se gaste DESCUBRIENDO pantallas nuevas y bajando en
+    profundidad, no volviendo sobre lo ya visto:
+      +0/1  link/button vs contenedor generico
+      +3    nav/header, pero SOLO a depth>0 — desde el inicio la nav es como
+            se descubren las secciones; una vez dentro es ruido "hacia arriba"
+      +3    footer (legal, redes: casi nunca abre un flujo util)
+      +4    label tipo "Volver" / "Ir al inicio" (a veces <button> sin href,
+            no lo agarra el chequeo de ruta visitada)
+      +3    href a una pagina legal (politica/terminos/cookies)
+      +5    href a una ruta YA visitada (el logo, un link de nav repetido)
     """
-    scored: list[tuple[int, Element]] = []
-    for element in elements:
+    scored: list[tuple[int, int, Element]] = []
+    for index, element in enumerate(elements):
         if not any(selector.unique for selector in element.selectors):
             continue
         if _is_destructive(element):
@@ -106,19 +129,55 @@ def candidate_elements(
         href = element.attributes.get("href", "")
         if _is_off_scope_href(href) or not _is_same_origin(href, base_netloc):
             continue
+
         priority = 0 if element.kind in _PREFERRED_KINDS else 1
-        scored.append((priority, element))
-    scored.sort(key=lambda pair: pair[0])
-    return [element for _, element in scored[:max_actions]]
+        if depth > 0 and element.region in ("nav", "header"):
+            priority += 3
+        if element.region == "footer":
+            priority += 3
+
+        label_text = f"{element.label or ''} {element.text or ''}".lower()
+        if any(word in label_text for word in _BACK_WORDS):
+            priority += 4
+
+        destination = urlsplit(href).path.lower() if href else ""
+        if destination and any(word in destination for word in _LEGAL_PATH_WORDS):
+            priority += 3
+        if destination and destination in visited_paths:
+            priority += 5
+
+        scored.append((priority, index, element))
+    scored.sort(key=lambda item: (item[0], item[1]))
+    return [element for _, _, element in scored[:max_actions]]
 
 
-def state_signature(url: str, elements: list[Element]) -> tuple[str, tuple[str, ...]]:
-    """Identidad de un estado: path de la URL + el conjunto de elementos
-    presentes. Los cambios de estado de una SPA no siempre cambian la URL
-    (ver docstring de _perform_search en explorer/page.py), asi que la URL
-    sola no alcanza para distinguir dos estados."""
+def state_signature(url: str, elements: list[Element]) -> tuple:
+    """Identidad ESTABLE de una pantalla, robusta al contenido dinamico.
+
+    Una SPA no siempre cambia la URL entre estados (ver _perform_search en
+    explorer/page.py), pero "path + todos los elementos" tampoco sirve:
+    carruseles y listas lazy reordenan o agregan elementos en la MISMA
+    pantalla y eso la haria ver como varios estados distintos (lo que agota
+    el presupuesto del crawler con homes fantasma). Tampoco alcanza con el
+    "chrome" (nav/header) — a veces re-renderiza distinto entre visitas. Se
+    usa: el path; si hay un modal/overlay abierto; y una forma GRUESA del
+    cuerpo — los labels exactos si son pocos elementos primary (formulario,
+    wizard: distingue paso 1 de paso 2), o solo "grid" si son muchos
+    (listado de tarjetas: no forkea por reordenarse). Ver _BODY_LABEL_LIMIT.
+    """
     parsed = urlsplit(url)
-    return (parsed.path or "/", tuple(sorted(element.key for element in elements)))
+    path = parsed.path or "/"
+    modal_open = any(element.region in ("dialog", "overlay") for element in elements)
+    body_labels = sorted(
+        (element.label or element.text or "").strip().lower()
+        for element in elements
+        if element.region not in ("nav", "header", "footer")
+        and element.importance in ("primary", "blocking")
+    )
+    body: tuple = (
+        tuple(body_labels) if len(body_labels) <= _BODY_LABEL_LIMIT else ("grid",)
+    )
+    return (path, modal_open, body)
 
 
 def unique_page_key(base_key: str, used: set[str]) -> str:
@@ -156,7 +215,10 @@ def _walk(
     if depth >= max_depth or len(state.pages) >= state.max_pages:
         return
 
-    candidates = candidate_elements(from_page.elements, base_netloc, max_actions_per_page)
+    visited_paths = frozenset(page.url_pattern for page in state.pages)
+    candidates = candidate_elements(
+        from_page.elements, base_netloc, max_actions_per_page, visited_paths, depth
+    )
     parent_url = browser_page.url
 
     for element in candidates:
@@ -176,6 +238,7 @@ def _walk(
 
         if signature in state.visited_signatures:
             to_key = state.visited_signatures[signature]
+            newly_discovered = False
         else:
             parsed = urlsplit(new_url)
             base_key = _slug(new_title or parsed.path or parsed.netloc, "page")
@@ -187,10 +250,15 @@ def _walk(
             state.pages.append(new_page)
             state.pages_by_key[to_key] = new_page
             state.visited_signatures[signature] = to_key
+            newly_discovered = True
 
         transition = Transition(from_page.key, to_key, "click", element.key)
         state.transitions.append(transition)
-        if to_key not in state.first_transition_into:
+        # El camino que alcanzo una pagina se registra solo la primera vez que
+        # se la descubre. Un revisita — incluida una vuelta al estado raiz — no
+        # debe crear una arista hacia atras aca: _flow_for_page recorre
+        # first_transition_into en reversa y un ciclo lo colgaria (MemoryError).
+        if newly_discovered:
             state.first_transition_into[to_key] = transition
 
         if to_key not in state.expanded:
@@ -225,10 +293,14 @@ def _flow_for_page(page_key: str, state: _CrawlState) -> Flow:
     mismo formato de FlowStep que ya usa el flow 'search' de explore_page."""
     chain: list[Transition] = []
     current = page_key
+    seen: set[str] = {current}
     while current in state.first_transition_into:
         transition = state.first_transition_into[current]
         chain.append(transition)
         current = transition.from_page
+        if current in seen:  # guarda defensiva de ciclo (ademas del fix en _walk)
+            break
+        seen.add(current)
     chain.reverse()
     steps = [
         FlowStep(action=transition.action, target=transition.target, expected_page=transition.to_page)
