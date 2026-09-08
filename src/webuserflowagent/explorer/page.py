@@ -245,6 +245,49 @@ def elements_from_raw(items: Iterable[dict[str, Any]]) -> list[Element]:
     return elements
 
 
+_STABILIZE_POLL_MS = 300
+_STABLE_POLLS_REQUIRED = 3
+_STABILIZE_BUDGET_MS = 6_000
+
+
+def _wait_for_interactive_content(browser_page: Any, timeout_ms: int) -> None:
+    """Wait for the set of interactive elements to render and settle.
+
+    Single-page apps (Angular, React, ...) often finish `domcontentloaded`
+    before their JS bundle has hydrated the page, which used to make the
+    explorer capture an empty shell. Some apps also assemble the page from
+    several async modules (e.g. a shell plus a lazily-loaded login
+    micro-frontend), so the first interactive element to appear does not
+    mean the rest have arrived yet. This waits for the first element, then
+    polls the element count until it stops growing (stable across a few
+    consecutive checks) or a bounded extra budget runs out, so pages that
+    are already interactive aren't slowed down.
+    """
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+    try:
+        browser_page.wait_for_selector(INTERACTIVE_SELECTOR, timeout=timeout_ms)
+    except PlaywrightTimeoutError:
+        return
+
+    locator = browser_page.locator(INTERACTIVE_SELECTOR)
+    budget_ms = min(timeout_ms, _STABILIZE_BUDGET_MS)
+    elapsed_ms = 0
+    previous_count = -1
+    stable_polls = 0
+    while elapsed_ms < budget_ms:
+        browser_page.wait_for_timeout(_STABILIZE_POLL_MS)
+        elapsed_ms += _STABILIZE_POLL_MS
+        current_count = locator.count()
+        if current_count == previous_count:
+            stable_polls += 1
+            if stable_polls >= _STABLE_POLLS_REQUIRED:
+                return
+        else:
+            stable_polls = 0
+        previous_count = current_count
+
+
 def _capture(browser_page: Any) -> tuple[list[dict[str, Any]], str, str]:
     raw = browser_page.locator(INTERACTIVE_SELECTOR).evaluate_all(EXTRACT_ELEMENTS_SCRIPT)
     return raw, browser_page.url, _repair_text(browser_page.title())
@@ -354,6 +397,7 @@ def explore_page(
         try:
             browser_page = browser.new_page()
             browser_page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            _wait_for_interactive_content(browser_page, timeout_ms)
             initial_raw, initial_url, initial_title = _capture(browser_page)
             if screenshot_path and dismiss_cookies:
                 path = Path(screenshot_path)
