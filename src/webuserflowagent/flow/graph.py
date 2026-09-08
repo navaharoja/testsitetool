@@ -235,9 +235,13 @@ def _walk(
         raw, new_url, new_title = _capture(browser_page)
         new_elements = elements_from_raw(raw)
         signature = state_signature(new_url, new_elements)
+        anchor_key = _anchor_of_visited_page(new_url, new_elements, state)
 
         if signature in state.visited_signatures:
             to_key = state.visited_signatures[signature]
+            newly_discovered = False
+        elif anchor_key is not None:
+            to_key = anchor_key
             newly_discovered = False
         else:
             parsed = urlsplit(new_url)
@@ -285,6 +289,28 @@ def _walk(
                 except Exception:
                     pass
             _wait_for_interactive_content(browser_page, timeout_ms)
+
+
+def _anchor_of_visited_page(
+    new_url: str, new_elements: list[Element], state: _CrawlState
+) -> str | None:
+    """Si `new_url` es una sub-ruta de una pagina ya vista (p. ej.
+    `/home/beneficios` bajo `/home`) y sus elementos son un subconjunto de los
+    de esa pagina, es la MISMA pantalla — tipico de landings de una sola pagina
+    que ponen la seccion en la URL. Sin esto el crawler las cuenta como N
+    estados distintos. Devuelve la key de la pagina padre, o None.
+    """
+    new_path = urlsplit(new_url).path or "/"
+    new_keys = {element.key for element in new_elements}
+    for page in state.pages:
+        parent = page.url_pattern.rstrip("/")
+        if (
+            new_path != page.url_pattern
+            and new_path.startswith(parent + "/")
+            and new_keys <= {element.key for element in page.elements}
+        ):
+            return page.key
+    return None
 
 
 def _flow_for_page(page_key: str, state: _CrawlState) -> Flow:

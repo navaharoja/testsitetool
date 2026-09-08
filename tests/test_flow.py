@@ -1,9 +1,12 @@
 from webuserflowagent.explorer.page import elements_from_raw
 from webuserflowagent.flow.graph import (
+    _anchor_of_visited_page,
+    _CrawlState,
     candidate_elements,
     state_signature,
     unique_page_key,
 )
+from webuserflowagent.models import Page
 
 
 def test_candidate_elements_excludes_destructive_wording():
@@ -73,6 +76,35 @@ def test_state_signature_is_stable_for_the_same_state():
     second = state_signature("https://example.com/home", elements)
 
     assert first == second
+
+
+def _page(key, path, elements):
+    return Page(key=key, title="Inicio", state_type="ready", url_pattern=path, elements=elements)
+
+
+def test_anchor_subpath_with_subset_elements_collapses_to_parent():
+    home = elements_from_raw([
+        {"tag": "a", "role": "link", "text": "Inicio", "href": "/home", "css": "#a"},
+        {"tag": "a", "role": "link", "text": "Beneficios", "href": "/home/beneficios", "css": "#b"},
+        {"tag": "button", "role": "button", "text": "Entrar", "css": "#c"},
+    ])
+    section = [e for e in home if e.key != "button_entrar"]  # subconjunto del home
+
+    state = _CrawlState()
+    state.pages.append(_page("home", "/home", home))
+
+    assert _anchor_of_visited_page("https://x.cl/home/beneficios", section, state) == "home"
+
+
+def test_sibling_path_is_not_treated_as_an_anchor():
+    home = elements_from_raw([{"tag": "a", "role": "link", "text": "Inicio", "href": "/home", "css": "#a"}])
+    other = elements_from_raw([{"tag": "a", "role": "link", "text": "Buscar", "href": "/buscar", "css": "#b"}])
+
+    state = _CrawlState()
+    state.pages.append(_page("home", "/home", home))
+
+    # ni es sub-ruta de /home ni sus elementos son subconjunto
+    assert _anchor_of_visited_page("https://x.cl/buscar", other, state) is None
 
 
 def test_unique_page_key_appends_suffix_on_collision():
