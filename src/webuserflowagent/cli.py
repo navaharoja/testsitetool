@@ -53,6 +53,10 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not dismiss a recognized cookie consent dialog",
     )
+    flow_parser.add_argument(
+        "--browser", choices=["chromium", "firefox", "webkit"], default="chromium",
+        help="Browser engine to use (default: chromium)",
+    )
     return parser
 
 
@@ -83,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
             max_actions_per_page=args.max_actions_per_page,
             max_depth=args.max_depth,
             dismiss_cookies=not args.keep_cookies,
+            browser_name=args.browser,
         )
         save(manifest, output)
         element_count = sum(len(page.elements) for page in manifest.pages)

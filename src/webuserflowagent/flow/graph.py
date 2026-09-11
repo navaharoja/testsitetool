@@ -347,6 +347,7 @@ def explore_flows(
     max_actions_per_page: int = DEFAULT_MAX_ACTIONS_PER_PAGE,
     max_depth: int = DEFAULT_MAX_DEPTH,
     dismiss_cookies: bool = True,
+    browser_name: str = "chromium",
 ) -> ApplicationManifest:
     """Explora un sitio siguiendo clicks reales (BFS/DFS acotado por
     max_pages/max_actions_per_page/max_depth), a diferencia de explore_page
@@ -363,7 +364,7 @@ def explore_flows(
     state = _CrawlState(max_pages=max_pages)
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=headless)
+        browser = getattr(playwright, browser_name).launch(headless=headless)
         try:
             browser_page = browser.new_page()
             browser_page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
