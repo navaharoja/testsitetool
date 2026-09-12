@@ -294,14 +294,24 @@ def _capture(browser_page: Any) -> tuple[list[dict[str, Any]], str, str]:
 
 
 def _dismiss_cookie_consent(browser_page: Any) -> str | None:
-    candidates = [
+    """Best-effort dismissal of a first-load cookie/consent banner.
+
+    Two passes: fixed selectors for the handful of consent platforms common
+    enough to hardcode (OneTrust, Cookiebot), then a role-based pass by
+    accessible name. The role-based pass matters because plenty of real
+    sites render their "Aceptar" control as `<input type="submit">` (classic
+    ASP.NET WebForms sites do this) or a `<div role="button">`, never an
+    actual `<button>` tag -- a tag-specific selector like
+    `button:has-text('Aceptar')` silently never matches those, no matter how
+    many phrase variants it lists, because `get_by_role("button", ...)`
+    maps the *accessible* role (button-like inputs included), not the tag.
+    """
+    fixed_selectors = [
+        ("#onetrust-accept-btn-handler", "onetrust_accept"),
+        ("#CybotCookiebotDialogBodyButtonAccept", "cookiebot_accept"),
         ("[data-testid='action:understood-button']", "button_aceptar_cookies"),
-        ("button:has-text('Aceptar cookies')", "button_aceptar_cookies"),
-        ("button:has-text('Accept cookies')", "button_accept_cookies"),
-        ("button:has-text('Aceptar todas')", "button_aceptar_todas"),
-        ("button:has-text('Entendido')", "button_entendido"),
     ]
-    for selector, target in candidates:
+    for selector, target in fixed_selectors:
         locator = browser_page.locator(selector)
         for index in range(locator.count()):
             candidate = locator.nth(index)
@@ -309,6 +319,19 @@ def _dismiss_cookie_consent(browser_page: Any) -> str | None:
                 candidate.click()
                 browser_page.wait_for_timeout(500)
                 return target
+
+    role_names = [
+        "Aceptar cookies", "Accept cookies", "Aceptar todas", "Accept all",
+        "Entendido", "Aceptar", "Accept", "Ok",
+    ]
+    for name in role_names:
+        locator = browser_page.get_by_role("button", name=name)
+        for index in range(locator.count()):
+            candidate = locator.nth(index)
+            if candidate.is_visible():
+                candidate.click()
+                browser_page.wait_for_timeout(500)
+                return "role_button_" + re.sub(r"\W+", "_", name.lower()).strip("_")
     return None
 
 
@@ -431,13 +454,14 @@ def explore_page(
     if consent_target:
         initial_key = f"{page_key}_cookie_consent"
         ready_key = f"{page_key}_ready"
+        initial_elements = elements_from_raw(initial_raw)
         pages = [
             Page(
                 key=initial_key,
                 title=initial_title or None,
                 state_type="blocked",
                 url_pattern=urlsplit(initial_url).path or "/",
-                elements=elements_from_raw(initial_raw),
+                elements=initial_elements,
             ),
             Page(
                 key=ready_key,
@@ -447,7 +471,25 @@ def explore_page(
                 elements=ready_elements,
             ),
         ]
-        transitions.append(Transition(initial_key, ready_key, "click", consent_target))
+        # `consent_target` is a human-readable label for *which* dismissal
+        # strategy matched (e.g. "role_button_aceptar"), not a real element
+        # key -- a Transition's target must reference an element actually
+        # captured on its from_page, or ApplicationManifest.validate() raises
+        # "Transition target does not exist in its source page". Look up the
+        # real captured element that was almost certainly the one clicked,
+        # by the same keywords the dismissal strategies matched on; skip
+        # recording the transition (the two pages still stand as evidence)
+        # if none is found rather than inventing an invalid target.
+        consent_keywords = ("acept", "accept", "consent", "cookie", "entendido", "agree", "ok")
+        consent_element = next(
+            (
+                element for element in initial_elements
+                if any(kw in (element.text or element.label or "").lower() for kw in consent_keywords)
+            ),
+            None,
+        )
+        if consent_element:
+            transitions.append(Transition(initial_key, ready_key, "click", consent_element.key))
     else:
         pages = [
             Page(
