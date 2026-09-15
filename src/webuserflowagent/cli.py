@@ -54,8 +54,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Do not dismiss a recognized cookie consent dialog",
     )
     flow_parser.add_argument(
-        "--browser", choices=["chromium", "firefox", "webkit"], default="chromium",
-        help="Browser engine to use (default: chromium)",
+        "--browser", choices=["chromium", "firefox", "webkit", "edge"], default="chromium",
+        help="Browser engine to use (default: chromium). 'edge' launches the "
+             "installed Microsoft Edge via Playwright's chromium driver.",
     )
     return parser
 

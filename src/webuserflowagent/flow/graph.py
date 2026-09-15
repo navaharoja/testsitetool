@@ -38,6 +38,57 @@ DEFAULT_MAX_PAGES = 8
 DEFAULT_MAX_ACTIONS_PER_PAGE = 8
 DEFAULT_MAX_DEPTH = 3
 
+
+def _primary_screen_size() -> tuple[int, int]:
+    """Tamano de la pantalla primaria, para abrir el navegador headed a
+    pantalla completa en vez del tamano fijo chico de Playwright. Windows
+    only (ctypes, sin dependencias nuevas); si falla o no es Windows, un
+    tamano grande razonable como respaldo."""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+    except Exception:
+        return 1920, 1080
+
+
+_CLOSE_WORDS = ("cerrar", "close")
+_CLOSE_SYMBOLS = ("×", "✕", "✖", "x")
+
+
+def _close_extra_pages(browser_page: Any) -> None:
+    """Cierra cualquier pestana/ventana extra que haya aparecido en el mismo
+    contexto del navegador, dejando solo `browser_page`. Cubre dos origenes
+    distintos de pestanas huerfanas: un click con target="_blank"/window.open
+    real del sitio, y una condicion de carrera propia de Firefox+Playwright
+    donde el lanzamiento inicial (browser.new_page()+goto(), ANTES de
+    cualquier click) a veces crea una segunda ventana "about:blank" que
+    intenta cargar la misma URL por su cuenta y a veces falla ("Problem
+    loading page"), quedando visible indefinidamente junto a la real
+    (reportado por el usuario como "se abren dos ventanas, una apuntando a
+    algo roto" -- Casaverso, 2026-09-15)."""
+    for extra_page in list(browser_page.context.pages):
+        if extra_page is not browser_page:
+            try:
+                extra_page.close()
+            except Exception:
+                pass
+
+
+def _find_close_button(elements: list[Element]) -> Element | None:
+    """Entre los elementos de un modal/overlay que Escape no cerro, busca uno
+    que parezca su boton de cerrar -- por label/texto ("Cerrar", "Close") o
+    un simbolo de X aislado (icon-only, sin aria-label real)."""
+    for el in elements:
+        label = (el.label or el.text or "").strip().lower()
+        if not label:
+            continue
+        if any(word in label for word in _CLOSE_WORDS):
+            return el
+        if label in _CLOSE_SYMBOLS and el.kind in ("button", "link"):
+            return el
+    return None
+
 # state_signature: cuantos elementos primary en el cuerpo antes de dejar de
 # distinguirlos por label y tratar la pantalla como un listado ("grid"). Sube
 # esto si un wizard/form con muchos campos se esta colapsando con otro estado;
@@ -230,6 +281,14 @@ def _walk(
         except Exception:
             continue  # el elemento ya no es clickeable (se movio, quedo oculto, etc.) — se salta
 
+        # Si el clic disparo target="_blank" o window.open(), Playwright abre
+        # esa pestana/ventana aparte y el resto de este codigo nunca la ve --
+        # queda huerfana, consumiendo recursos (cada una es un proceso Firefox
+        # completo) y a veces mostrando algo roto (un sitio real en QA llego a
+        # abrir un popup con una URL malformada). Cerrar todo lo que no sea
+        # browser_page antes de seguir con el siguiente candidato.
+        _close_extra_pages(browser_page)
+
         browser_page.wait_for_timeout(500)
         _wait_for_interactive_content(browser_page, timeout_ms)
         raw, new_url, new_title = _capture(browser_page)
@@ -265,12 +324,70 @@ def _walk(
         if newly_discovered:
             state.first_transition_into[to_key] = transition
 
-        if to_key not in state.expanded:
+        opened_modal = any(el.region in ("dialog", "overlay") for el in new_elements)
+
+        # Un modal/overlay no es una "pagina" a explorar recursivamente -- sus
+        # propios candidatos (p. ej. "Siguiente imagen"/"Imagen anterior" en un
+        # lightbox de galeria) solo cambian estado interno sin URL nueva, y
+        # go_back() no puede deshacer eso al volver: el recorrido queda
+        # atrapado dentro del modal o termina saliendo de la pagina entera por
+        # el goto de respaldo. En vez de recursar, se cierra inmediatamente
+        # abajo y se sigue con el siguiente candidato hermano. Encontrado en un
+        # lightbox de galeria de imagenes que nunca cerraba ni avanzaba
+        # (Casaverso, 2026-09-15).
+        if to_key not in state.expanded and not opened_modal:
             state.expanded.add(to_key)
             _walk(
                 browser_page, state.pages_by_key[to_key], depth + 1, max_depth,
                 max_actions_per_page, base_netloc, timeout_ms, state,
             )
+        elif opened_modal:
+            state.expanded.add(to_key)
+
+        # Si el clic abrio un modal/overlay puramente client-side (la URL no
+        # cambia), cerrarlo antes del siguiente candidato hermano -- si no,
+        # cada hermano subsiguiente falla al estar tapado por el overlay,
+        # consumiendo su propio timeout uno por uno hasta agotar el
+        # presupuesto total del recorrido. Encontrado en un lightbox de
+        # galeria de imagenes (Casaverso, 2026-09-14).
+        if opened_modal:
+            try:
+                browser_page.keyboard.press("Escape")
+            except Exception:
+                pass
+            # Un fixed wait tras Escape no alcanza: algunos modales cierran
+            # con una transicion/animacion CSS que tarda mas de 300ms, y el
+            # chequeo llegaba a ver el modal "todavia abierto" mientras en
+            # realidad ya se estaba desvaneciendo -- el intento de click de
+            # respaldo entonces fallaba con "element is not stable" contra un
+            # boton que estaba a punto de desaparecer (encontrado 2026-09-15
+            # reproduciendo el cierre paso a paso contra el lightbox real).
+            # Se sondea hasta 1.5s en vez de esperar un tiempo fijo.
+            still_open: list[Element] = []
+            for _ in range(5):
+                browser_page.wait_for_timeout(300)
+                raw_after, _, _ = _capture(browser_page)
+                still_open = [
+                    el for el in elements_from_raw(raw_after)
+                    if el.region in ("dialog", "overlay")
+                ]
+                if not still_open:
+                    break
+            # Escape no cierra todos los modales -- un dialogo "Compartir"
+            # (WhatsApp/Facebook/X/Email) real en Casaverso solo escucha
+            # clicks en su boton "X", no el teclado (encontrado 2026-09-15:
+            # quedaba abierto indefinidamente, tapando la pagina, mientras el
+            # recorrido seguia clickeando "detras" sin que se notara desde
+            # afuera). Si sigue habiendo overlay tras Escape, buscar un boton
+            # de cierre reconocible y clickearlo.
+            if still_open:
+                close_el = _find_close_button(still_open)
+                if close_el is not None:
+                    try:
+                        _locator_for_element(browser_page, close_el).click(timeout=3000)
+                        browser_page.wait_for_timeout(300)
+                    except Exception:
+                        pass
 
         # Volver al estado del padre antes del siguiente candidato hermano.
         # go_back() funciona para la mayoria de navegaciones reales (cambian
@@ -364,10 +481,61 @@ def explore_flows(
     state = _CrawlState(max_pages=max_pages)
 
     with sync_playwright() as playwright:
-        browser = getattr(playwright, browser_name).launch(headless=headless)
+        launch_args = []
+        page_viewport = None
+        use_no_viewport = False
+        if not headless:
+            # Sin esto la ventana headed abre al tamano fijo de Playwright
+            # (chico) -- se ve casi nada del recorrido en vivo.
+            width, height = _primary_screen_size()
+            if browser_name == "firefox":
+                # Firefox espera "-width 1920", NO "-width=1920" -- con "="
+                # el flag no matchea, Firefox lo trata como un argumento
+                # posicional (una URL a abrir) y termina intentando navegar
+                # a algo sin sentido en vez de solo dimensionar la ventana.
+                launch_args = ["-width", str(width), "-height", str(height)]
+                # no_viewport=True no alcanza en Firefox -- la ventana abre
+                # grande pero el contenido sigue renderizado en el viewport
+                # fijo 1280x720 de Playwright. Un viewport explicito, del
+                # tamano real de pantalla (menos la barra/chrome del
+                # navegador), sí llena la ventana de verdad. Verificado en
+                # vivo: sin esto, 1280x736; con esto, 1536x870 en una
+                # pantalla de 1536x960.
+                page_viewport = {"width": width, "height": max(400, height - 90)}
+            else:
+                launch_args = ["--start-maximized"]
+                # Al reves que Firefox: en Chromium/Edge, pasar un viewport
+                # explicito hace que Playwright fuerce por CDP el tamano de
+                # la VENTANA real para que coincida con el viewport --
+                # cancelando el maximizado de "--start-maximized" (se
+                # verifico con IsZoomed(): con viewport explicito quedaba en
+                # False y ~1050x890; con no_viewport=True, True y ocupando
+                # toda la pantalla). Por eso aca no se fija page_viewport.
+                use_no_viewport = True
+        if browser_name == "edge":
+            # "edge" no es un driver propio de Playwright -- es el canal
+            # "msedge" del mismo driver chromium (Edge es Chromium por
+            # debajo). Se eligio como alternativa a Firefox porque Firefox
+            # (via el driver de Playwright, no por nada de nuestro codigo)
+            # a veces abre una segunda ventana nativa fantasma ("hidden
+            # window" propia de Gecko quedando visible) que Playwright ni
+            # siquiera ve en su propia API -- confirmado incluso sin
+            # argumentos de lanzamiento propios (Casaverso, 2026-09-15).
+            browser = playwright.chromium.launch(
+                headless=headless, channel="msedge", args=launch_args,
+            )
+        else:
+            browser = getattr(playwright, browser_name).launch(headless=headless, args=launch_args)
         try:
-            browser_page = browser.new_page()
+            if page_viewport:
+                browser_page = browser.new_page(viewport=page_viewport)
+            elif use_no_viewport:
+                browser_page = browser.new_page(no_viewport=True)
+            else:
+                browser_page = browser.new_page()
             browser_page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            browser_page.wait_for_timeout(500)
+            _close_extra_pages(browser_page)
             _wait_for_interactive_content(browser_page, timeout_ms)
             raw, current_url, title = _capture(browser_page)
 
